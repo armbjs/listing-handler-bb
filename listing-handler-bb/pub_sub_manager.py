@@ -18,8 +18,10 @@ if __package__ == None or __package__ == '':
 else:
     from . import redis_client
 
-# pybit 라이브러리 임포트 (테스트 코드 기반)
 from pybit.unified_trading import HTTP
+
+import http.client  # 알림 기능 추가
+import urllib       # 알림 기능 추가
 
 env_file_path = pathlib.Path(__file__).parent.parent / ".env"
 print("env_file_path", env_file_path)
@@ -114,17 +116,46 @@ class TradingAgent:
         self.telegram_redis_client = telegram_redis_client
         self.INSTANCE_NAME = INSTANCE_NAME
 
-        # Bybit 클라이언트 초기화 (테스트코드 기반)
         self.bybit_client = HTTP(
             api_key=self.bybit_api_key,
             api_secret=self.bybit_secret_key,
             testnet=False
         )
 
-        # 초기 잔고 조회
         self.spot_balance_dict = self.get_amount_dict_in_bybit_spot()
         balance_dict = self.get_filtered_amount_dict_in_bybit_spot()
         self.send_messsage_to_telegram(f"TA 시작: {balance_dict}")
+
+    def send_pushover_notification(self, title, message):
+        HOST = "api.pushover.net:443"
+        ENDPOINT = "/1/messages.json"
+        APP_TOKEN = "abgdqz5qszbtve26nfxgdgcn2viy9z"
+        USER_KEY = "u33mp5n17yesssku41o2e56cqezonq"
+
+        params = {
+            "token": APP_TOKEN,
+            "user": USER_KEY,
+            "message": message,
+            "title": title,
+            "sound": "tornado_siren",
+            "priority": 1,
+            "device": "bjs",
+            "expire": 3600,
+            "retry": 60
+        }
+
+        try:
+            conn = http.client.HTTPSConnection(HOST)
+            conn.request("POST", ENDPOINT, urllib.parse.urlencode(params),
+                         {"Content-type": "application/x-www-form-urlencoded"})
+            response = conn.getresponse()
+            resp_data = response.read().decode('utf-8', errors='replace')
+            if response.status == 200:
+                print(f"🚨 Alert sent successfully! Response: {resp_data}")
+            else:
+                print(f"⚠️ Failed to send alert: {resp_data}")
+        except Exception as e:
+            print(f"⚠️ An error occurred while sending alert: {e}")
 
     def send_messsage_to_telegram(self, msg):
         now_dt = datetime.datetime.now(tz=pytz.timezone("Asia/Seoul"))
@@ -140,11 +171,9 @@ class TradingAgent:
         self.spot_balance_dict = self.get_amount_dict_in_bybit_spot()
 
     def get_amount_dict_in_bybit_spot(self):
-        """Bybit Unified 계정 잔고 조회 후 dict로 반환"""
         response = self.bybit_client.get_wallet_balance(accountType="UNIFIED")
         amount_dict = {}
         if response['retCode'] == 0:
-            # 각 account에 대해 순회
             for account in response['result']['list']:
                 for c in account['coin']:
                     wallet_balance = float(c.get('walletBalance', 0))
@@ -158,23 +187,17 @@ class TradingAgent:
         filtered_dict = {}
         for k, v in self.spot_balance_dict.items():
             if k != 'USDT':
-                # 0.0 형태의 자산 걸러내기
                 if v in ('0.00000000', '0.00', '0.0', '0'):
                     continue
             filtered_dict[k] = v
         return filtered_dict
 
     def buy_market_order_in_bybit_spot(self, order_currency, payment_currency, value_in_payment_currency):
-        import math
-
         usdt_balance = float(value_in_payment_currency)
-
         usdt_to_use = math.floor(usdt_balance * 100) / 100.0
-        if usdt_to_use <= 0:
-            # 잔고가 부족한 경우도 그냥 빈 문자열이나 response 없이 반환 (기존 로직대로 처리)
-            return ""
 
-        qty_str = str(usdt_to_use)
+        # usdt_to_use <= 0이라도 주문 시도(거래소에서 거절될 수 있음)
+        qty_str = str(usdt_to_use if usdt_to_use > 0 else 1)
 
         order_resp = self.bybit_client.place_order(
             category="spot",
@@ -185,9 +208,7 @@ class TradingAgent:
             marketUnit="quoteCoin"
         )
 
-        # 기존 바이낸스 로직과 동일하게 response를 그대로 문자열로 반환
-        return str(order_resp)
-
+        return order_resp
 
     def message_handler(self, message: dict):
         try:
@@ -196,7 +217,7 @@ class TradingAgent:
             notice_data_str = message['data']
 
             if type(notice_data_str) != str:
-                print(f"notice_data_str is not a str type. notice_data_str: {notice_data_str} / type(notice_data_str): {type(notice_data_str)}")
+                print(f"notice_data_str is not a str type: {notice_data_str}")
                 return
 
             try:
@@ -218,7 +239,7 @@ class TradingAgent:
                 return
 
             notice_exchange = notice_data['exchange']
-            usdt_amount_in_spot_wallet = self.spot_balance_dict.get('USDT', '0') 
+            usdt_amount_in_spot_wallet = self.spot_balance_dict.get('USDT', '0')
 
             if notice_exchange == 'BITHUMB':
                 from decimal import Decimal
@@ -227,15 +248,28 @@ class TradingAgent:
 
             order_currency_list = self.extract_order_currency_list_to_buy(notice_exchange, notice_title)
             print("order_currency_list", order_currency_list)
-            
+
             result_list = []
+            filled_coins = []
+
             for this_oc in order_currency_list:
                 try:
-                    result = self.buy_market_order_in_bybit_spot(this_oc, 'USDT', usdt_amount_in_spot_wallet)
+                    order_resp = self.buy_market_order_in_bybit_spot(this_oc, 'USDT', usdt_amount_in_spot_wallet)
+                    ret_code = order_resp.get('retCode')
+                    # retCode==0 이면 주문 성공 처리
+                    if ret_code == 0:
+                        filled_coins.append(this_oc)
+                    result_list.append(str(order_resp))
                 except Exception as inner_e:
-                    result = f"\n\n{this_oc} exception occurred. inner_e: {inner_e} skipped...\n\n"
+                    result_str = f"\n\n{this_oc} exception occurred. inner_e: {inner_e} skipped...\n\n"
+                    result_list.append(result_str)
 
-                result_list.append(result)
+            print("filled_coins", filled_coins)
+            if len(filled_coins) > 0:
+                filled_coins_str = ", ".join(filled_coins)
+                alert_msg = f"🚨⚠️ 매수 성공 - 공지사항: {notice_title}\n매수 완료 코인: {filled_coins_str} 🚨⚠️"
+                self.send_pushover_notification("매수 알림", alert_msg)
+
             print("result_list", result_list)
             result_str = "\n".join(result_list)
             self.send_messsage_to_telegram(result_str)
@@ -276,7 +310,6 @@ if __name__ == '__main__':
     BYBIT_API_SECRET = os.environ["BYBIT_API_SECRET"]
     INSTANCE_NAME = os.environ["INSTANCE_NAME"]
 
-
     ss = {
         "service_namespace": "zoo",
         "service_name": "kabigon",
@@ -312,7 +345,7 @@ if __name__ == '__main__':
                 ta.update_amount_dict_in_bybit_spot()
                 balance_dict = ta.get_filtered_amount_dict_in_bybit_spot()
 
-            if i % 3600 == 0:            
+            if i % 3600 == 0:
                 ta.send_messsage_to_telegram(f"현재 SPOT balance: {balance_dict}")
 
         time.sleep(1)
