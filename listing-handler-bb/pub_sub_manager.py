@@ -27,6 +27,7 @@ env_file_path = pathlib.Path(__file__).parent.parent / ".env"
 print("env_file_path", env_file_path)
 dotenv.load_dotenv(env_file_path, override=True)
 
+PUBSUB_CHANNEL_NAME = f"CF_NEW_NOTICES"
 
 class PubSubManager(redis_client.real_redis_client_interface.RealRedisClientInterface):
     def prepare_pubsub(self, message_handler):
@@ -157,7 +158,8 @@ class TradingAgent:
         except Exception as e:
             print(f"⚠️ An error occurred while sending alert: {e}")
 
-    def send_messsage_to_telegram(self, msg):
+    # ==== 변경 부분 시작 ==== (send_messsage_to_telegram 함수 수정)
+    def send_messsage_to_telegram(self, msg, transaction=False):
         now_dt = datetime.datetime.now(tz=pytz.timezone("Asia/Seoul"))
         now_dt_str = now_dt.isoformat()
         notice_data = {
@@ -165,7 +167,10 @@ class TradingAgent:
                 "time": now_dt_str,
                 "message": f"{self.INSTANCE_NAME}\n{msg}\n"
         }
-        self.telegram_redis_client._execute_xadd("NOTICE_STREAM:RUA_UB_BN_LISTING", value_dict=notice_data)
+
+        # transaction 여부에 따라 다른 Redis Stream 사용
+        stream_name = "NOTICE_STREAM:RUA_UB_BN_LISTING_TRANSACTION" if transaction else "NOTICE_STREAM:RUA_UB_BN_LISTING"
+        self.telegram_redis_client._execute_xadd(stream_name, value_dict=notice_data)
 
     def update_amount_dict_in_bybit_spot(self):
         self.spot_balance_dict = self.get_amount_dict_in_bybit_spot()
@@ -273,6 +278,20 @@ class TradingAgent:
             print("result_list", result_list)
             result_str = "\n".join(result_list)
             self.send_messsage_to_telegram(result_str)
+
+            transaction_msgs = []
+            for order_resp_str in result_list:
+                if "'retCode': 0" in order_resp_str:
+                    # 체결 성공
+                    transaction_msgs.append(f"✅ 매수 체결 데이터: {order_resp_str}")
+                else:
+                    # 실패
+                    transaction_msgs.append(f"❌ 매수 실패 데이터: {order_resp_str}")
+
+            if transaction_msgs:
+                transaction_str = "\n".join(transaction_msgs)
+                self.send_messsage_to_telegram(transaction_str, transaction=True)
+
             self.update_amount_dict_in_bybit_spot()
 
         except Exception as e:
@@ -334,9 +353,20 @@ if __name__ == '__main__':
 
     ta = TradingAgent(BYBIT_API_KEY, BYBIT_API_SECRET, telegram_redis_client, INSTANCE_NAME)
 
-    redis_publish_channel_key_name = f"CF_NEW_NOTICES"
+    redis_publish_channel_key_name = PUBSUB_CHANNEL_NAME
     psm.prepare_pubsub(ta.message_handler)
     psm.subscribe(redis_publish_channel_key_name)
+
+    if PUBSUB_CHANNEL_NAME != "CF_NEW_NOTICES":
+        def warning_sender():
+            while True:
+                warning_msg = f"PUBSUB_CHANNEL_NAME가 'CF_NEW_NOTICES'가 아닌 '{PUBSUB_CHANNEL_NAME}'로 설정되어 있습니다. TEST 환경인지 확인하세요!"
+                ta.send_messsage_to_telegram(warning_msg)
+                time.sleep(30)
+
+        warning_thread = threading.Thread(target=warning_sender)
+        warning_thread.daemon = True
+        warning_thread.start()
 
     i = 0
     while True:
