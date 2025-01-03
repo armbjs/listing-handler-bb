@@ -23,6 +23,9 @@ from pybit.unified_trading import HTTP
 import http.client  # 알림 기능 추가
 import urllib       # 알림 기능 추가
 
+from process_template.utils import get_number_str_with_precision
+
+
 env_file_path = pathlib.Path(__file__).parent.parent / ".env"
 print("env_file_path", env_file_path)
 dotenv.load_dotenv(env_file_path, override=True)
@@ -247,9 +250,11 @@ class TradingAgent:
             usdt_amount_in_spot_wallet = self.spot_balance_dict.get('USDT', '0')
 
             if notice_exchange == 'BITHUMB':
-                from decimal import Decimal
-                half_amount = Decimal(usdt_amount_in_spot_wallet) / Decimal('2')
-                usdt_amount_in_spot_wallet = str(half_amount)
+                print("usdt_amount_in_spot_wallet : ", usdt_amount_in_spot_wallet)
+                usdt_half = float(usdt_amount_in_spot_wallet) / 2
+                print("usdt_half : ", usdt_half)
+                usdt_amount_in_spot_wallet = get_number_str_with_precision(usdt_half, precision=4, rounding_rule=decimal.ROUND_DOWN)
+                print("usdt_amount_in_spot_wallet(get_number_str_with_precision) : ", usdt_amount_in_spot_wallet)
 
             order_currency_list = self.extract_order_currency_list_to_buy(notice_exchange, notice_title)
             print("order_currency_list", order_currency_list)
