@@ -129,6 +129,15 @@ class TradingAgent:
         self.spot_balance_dict = self.get_amount_dict_in_bybit_spot()
         balance_dict = self.get_filtered_amount_dict_in_bybit_spot()
         self.send_messsage_to_telegram(f"TA 시작: {balance_dict}")
+        self.purchased_orders = []
+
+    def is_order_purchased(self, order_currency, exchange):
+        """주어진 order_currency와 exchange가 이미 구매되었는지 확인"""
+        return (order_currency, exchange) in self.purchased_orders
+
+    def add_purchased_order(self, order_currency, exchange):
+        """주어진 order_currency와 exchange를 purchased_orders 리스트에 추가"""
+        self.purchased_orders.append((order_currency, exchange))
 
     def send_pushover_notification(self, title, message):
         HOST = "api.pushover.net:443"
@@ -264,11 +273,16 @@ class TradingAgent:
 
             for this_oc in order_currency_list:
                 try:
+                    if self.is_order_purchased(this_oc, notice_exchange):
+                        warning_msg = f"🔔 중복 구매 방지: {this_oc}는 이미 {notice_exchange}에서 구매되었습니다."
+                        self.send_messsage_to_telegram(warning_msg, transaction=True)
+                        continue  # 이미 구매한 경우 건너뜀
                     order_resp = self.buy_market_order_in_bybit_spot(this_oc, 'USDT', usdt_amount_in_spot_wallet)
                     ret_code = order_resp.get('retCode')
                     # retCode==0 이면 주문 성공 처리
                     if ret_code == 0:
                         filled_coins.append(this_oc)
+                        self.add_purchased_order(this_oc, notice_exchange)  # 구매 성공 시 리스트에 추가
                     result_list.append(str(order_resp))
                 except Exception as inner_e:
                     result_str = f"\n\n{this_oc} exception occurred. inner_e: {inner_e} skipped...\n\n"
@@ -288,7 +302,7 @@ class TradingAgent:
             for order_resp_str in result_list:
                 if "'retCode': 0" in order_resp_str:
                     # 체결 성공
-                    transaction_msgs.append(f"✅ 매수 체결 데이터: {order_resp_str}")
+                    transaction_msgs.append(f"✅ 매수 체결 데이터: {order_resp_str}, purchased_order_currency: {self.purchased_orders}")
                 else:
                     # 실패
                     transaction_msgs.append(f"❌ 매수 실패 데이터: {order_resp_str}")
@@ -382,6 +396,7 @@ if __name__ == '__main__':
 
             if i % 3600 == 0:
                 ta.send_messsage_to_telegram(f"현재 SPOT balance: {balance_dict}")
+                ta.send_messsage_to_telegram(f"purchased_order_currency_list: {ta.purchased_orders}")
 
         time.sleep(1)
         i += 1
